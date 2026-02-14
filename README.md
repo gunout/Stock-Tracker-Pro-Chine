@@ -1,4 +1,4 @@
-# 🏮 Tracker Bourse Chine - Analyse en Temps Réel
+# 🏮 Tracker Bourse Chine - Analyse en Temps Réel - 🕐 Fuseau : UTC+2 (Heure locale)
 🏮 Marchés chinois : Les données incluent les actions A (Shanghai/Shenzhen), actions H (Hong Kong) et ADRs (US). Les horaires de marché sont en heure locale. 
 
 # LIENS APP STREAMLIT :
