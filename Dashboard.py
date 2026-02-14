@@ -95,6 +95,14 @@ st.markdown("""
     .stButton>button {
         width: 100%;
     }
+    .error-message {
+        color: #ef553b;
+        background-color: #ffe6e6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #ef553b;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -243,6 +251,8 @@ def convert_to_local_time(china_time):
 
 def format_time_for_display(dt):
     """Formate l'heure pour l'affichage avec indication du fuseau"""
+    if dt.tzinfo is None:
+        dt = pytz.UTC.localize(dt)
     local_time = dt.astimezone(USER_TIMEZONE)
     return f"{local_time.strftime('%H:%M:%S')} (UTC+2)"
 
@@ -257,11 +267,14 @@ def load_stock_data(symbol, period, interval):
         
         # Convertir l'index en timezone-aware et ajuster à UTC+2
         if not hist.empty:
-            hist.index = hist.index.tz_localize('UTC').tz_convert(USER_TIMEZONE)
+            if hist.index.tz is None:
+                hist.index = hist.index.tz_localize('UTC').tz_convert(USER_TIMEZONE)
+            else:
+                hist.index = hist.index.tz_convert(USER_TIMEZONE)
         
         return hist, info
     except Exception as e:
-        st.error(f"Erreur: {e}")
+        st.error(f"Erreur de chargement pour {symbol}: {str(e)}")
         return None, None
 
 def get_exchange(symbol):
@@ -358,11 +371,31 @@ def format_currency(value, symbol):
     else:
         return f"${value:.2f}"
 
+def safe_get_metric(hist, metric, index=-1):
+    """Récupère une métrique en toute sécurité"""
+    try:
+        if hist is not None and not hist.empty and len(hist) > abs(index):
+            return hist[metric].iloc[index]
+        return 0
+    except:
+        return 0
+
 # Chargement des données
 hist, info = load_stock_data(symbol, period, interval)
 
-if hist is not None and not hist.empty:
-    current_price = hist['Close'].iloc[-1]
+# Vérification si les données sont disponibles
+if hist is None or hist.empty:
+    st.markdown(f"""
+    <div class='error-message'>
+        ⚠️ Impossible de charger les données pour {symbol}.<br>
+        Vérifiez que le symbole est correct et que les données sont disponibles.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Données par défaut pour éviter les erreurs
+    current_price = 0
+else:
+    current_price = safe_get_metric(hist, 'Close')
     
     # Vérification des alertes
     triggered_alerts = check_price_alerts(current_price, symbol)
@@ -398,168 +431,182 @@ if menu == "📈 Tableau de bord":
     </div>
     """, unsafe_allow_html=True)
     
-    # Statut du marché
-    market_status, market_icon = get_market_status()
-    st.info(f"{market_icon} Marché {symbol}: {market_status}")
-    
-    # Métriques principales
-    exchange = get_exchange(symbol)
-    st.subheader(f"📊 Aperçu en temps réel - {symbol} ({exchange})")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    previous_close = hist['Close'].iloc[-2] if len(hist) > 1 else current_price
-    change = current_price - previous_close
-    change_pct = (change / previous_close) * 100
-    
-    with col1:
-        st.metric(
-            label="Prix actuel",
-            value=format_currency(current_price, symbol),
-            delta=f"{change:.2f} ({change_pct:.2f}%)"
-        )
-    
-    with col2:
-        day_high = hist['High'].iloc[-1]
-        st.metric("Plus haut", format_currency(day_high, symbol))
-    
-    with col3:
-        day_low = hist['Low'].iloc[-1]
-        st.metric("Plus bas", format_currency(day_low, symbol))
-    
-    with col4:
-        volume = hist['Volume'].iloc[-1]
-        volume_formatted = f"{volume/1e6:.1f}M" if volume > 1e6 else f"{volume/1e3:.1f}K"
-        st.metric("Volume", volume_formatted)
-    
-    # Dernière mise à jour avec fuseau horaire
-    st.caption(f"Dernière mise à jour: {hist.index[-1].strftime('%Y-%m-%d %H:%M:%S')} UTC+2")
-    
-    # Graphique principal
-    st.subheader("📉 Évolution du prix")
-    
-    fig = go.Figure()
-    
-    # Chandeliers ou ligne selon l'intervalle
-    if interval in ["1m", "2m", "5m", "15m", "30m", "1h"]:
-        fig.add_trace(go.Candlestick(
-            x=hist.index,
-            open=hist['Open'],
-            high=hist['High'],
-            low=hist['Low'],
-            close=hist['Close'],
-            name='Prix',
-            increasing_line_color='#00cc96',
-            decreasing_line_color='#ef553b'
-        ))
+    if hist is None or hist.empty:
+        st.warning(f"Aucune donnée disponible pour {symbol}. Veuillez vérifier le symbole.")
     else:
-        fig.add_trace(go.Scatter(
-            x=hist.index,
-            y=hist['Close'],
-            mode='lines',
-            name='Prix',
-            line=dict(color='#c41e3a', width=2)
-        ))
-    
-    # Ajouter les moyennes mobiles
-    ma_20 = hist['Close'].rolling(window=20).mean()
-    ma_50 = hist['Close'].rolling(window=50).mean()
-    
-    fig.add_trace(go.Scatter(
-        x=hist.index,
-        y=ma_20,
-        mode='lines',
-        name='MA 20',
-        line=dict(color='orange', width=1, dash='dash')
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=hist.index,
-        y=ma_50,
-        mode='lines',
-        name='MA 50',
-        line=dict(color='purple', width=1, dash='dash')
-    ))
-    
-    # Volume
-    fig.add_trace(go.Bar(
-        x=hist.index,
-        y=hist['Volume'],
-        name='Volume',
-        yaxis='y2',
-        marker=dict(color='lightgray', opacity=0.3)
-    ))
-    
-    # Ajouter des lignes verticales pour les heures de trading
-    if interval in ["1m", "5m", "15m", "30m", "1h"]:
-        # Convertir les heures de trading chinoises en UTC+2
-        trading_morning_start = CHINA_TIMEZONE.localize(datetime.now().replace(hour=9, minute=30)).astimezone(USER_TIMEZONE)
-        trading_morning_end = CHINA_TIMEZONE.localize(datetime.now().replace(hour=11, minute=30)).astimezone(USER_TIMEZONE)
-        trading_afternoon_start = CHINA_TIMEZONE.localize(datetime.now().replace(hour=13, minute=0)).astimezone(USER_TIMEZONE)
-        trading_afternoon_end = CHINA_TIMEZONE.localize(datetime.now().replace(hour=15, minute=0)).astimezone(USER_TIMEZONE)
+        # Statut du marché
+        market_status, market_icon = get_market_status()
+        st.info(f"{market_icon} Marché {symbol}: {market_status}")
         
-        # Ajouter des annotations pour les périodes de trading
-        fig.add_vrect(
-            x0=trading_morning_start,
-            x1=trading_morning_end,
-            fillcolor="green",
-            opacity=0.1,
-            layer="below",
-            line_width=0,
-            annotation_text="Session matin"
-        )
-        fig.add_vrect(
-            x0=trading_afternoon_start,
-            x1=trading_afternoon_end,
-            fillcolor="green",
-            opacity=0.1,
-            layer="below",
-            line_width=0,
-            annotation_text="Session après-midi"
-        )
-    
-    fig.update_layout(
-        title=f"{symbol} - {period} - {exchange} (heures UTC+2)",
-        yaxis_title="Prix",
-        yaxis2=dict(
-            title="Volume",
-            overlaying='y',
-            side='right',
-            showgrid=False
-        ),
-        xaxis_title="Date (UTC+2)",
-        height=600,
-        hovermode='x unified',
-        template='plotly_white'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Informations sur l'entreprise
-    with st.expander("ℹ️ Informations sur l'entreprise"):
-        col1, col2 = st.columns(2)
+        # Métriques principales
+        exchange = get_exchange(symbol)
+        st.subheader(f"📊 Aperçu en temps réel - {symbol} ({exchange})")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        previous_close = safe_get_metric(hist, 'Close', -2) if len(hist) > 1 else current_price
+        change = current_price - previous_close
+        change_pct = (change / previous_close * 100) if previous_close != 0 else 0
         
         with col1:
-            st.write(f"**Nom :** {info.get('longName', 'N/A')}")
-            st.write(f"**Secteur :** {info.get('sector', 'N/A')}")
-            st.write(f"**Industrie :** {info.get('industry', 'N/A')}")
-            st.write(f"**Site web :** {info.get('website', 'N/A')}")
-            
-            # Informations spécifiques Chine
-            st.write(f"**Place de cotation :** {exchange}")
-            if 'currency' in info:
-                st.write(f"**Devise :** {info.get('currency', 'N/A')}")
+            st.metric(
+                label="Prix actuel",
+                value=format_currency(current_price, symbol),
+                delta=f"{change:.2f} ({change_pct:.2f}%)"
+            )
         
         with col2:
-            market_cap = info.get('marketCap', 0)
-            if market_cap > 0:
-                st.write(f"**Capitalisation :** {format_large_number(market_cap)}")
-            else:
-                st.write("**Capitalisation :** N/A")
+            day_high = safe_get_metric(hist, 'High')
+            st.metric("Plus haut", format_currency(day_high, symbol))
+        
+        with col3:
+            day_low = safe_get_metric(hist, 'Low')
+            st.metric("Plus bas", format_currency(day_low, symbol))
+        
+        with col4:
+            volume = safe_get_metric(hist, 'Volume')
+            volume_formatted = f"{volume/1e6:.1f}M" if volume > 1e6 else f"{volume/1e3:.1f}K"
+            st.metric("Volume", volume_formatted)
+        
+        # Dernière mise à jour avec fuseau horaire
+        if not hist.empty:
+            st.caption(f"Dernière mise à jour: {hist.index[-1].strftime('%Y-%m-%d %H:%M:%S')} UTC+2")
+        
+        # Graphique principal
+        st.subheader("📉 Évolution du prix")
+        
+        fig = go.Figure()
+        
+        # Chandeliers ou ligne selon l'intervalle
+        if interval in ["1m", "2m", "5m", "15m", "30m", "1h"]:
+            fig.add_trace(go.Candlestick(
+                x=hist.index,
+                open=hist['Open'],
+                high=hist['High'],
+                low=hist['Low'],
+                close=hist['Close'],
+                name='Prix',
+                increasing_line_color='#00cc96',
+                decreasing_line_color='#ef553b'
+            ))
+        else:
+            fig.add_trace(go.Scatter(
+                x=hist.index,
+                y=hist['Close'],
+                mode='lines',
+                name='Prix',
+                line=dict(color='#c41e3a', width=2)
+            ))
+        
+        # Ajouter les moyennes mobiles si assez de données
+        if len(hist) >= 20:
+            ma_20 = hist['Close'].rolling(window=20).mean()
+            fig.add_trace(go.Scatter(
+                x=hist.index,
+                y=ma_20,
+                mode='lines',
+                name='MA 20',
+                line=dict(color='orange', width=1, dash='dash')
+            ))
+        
+        if len(hist) >= 50:
+            ma_50 = hist['Close'].rolling(window=50).mean()
+            fig.add_trace(go.Scatter(
+                x=hist.index,
+                y=ma_50,
+                mode='lines',
+                name='MA 50',
+                line=dict(color='purple', width=1, dash='dash')
+            ))
+        
+        # Volume
+        fig.add_trace(go.Bar(
+            x=hist.index,
+            y=hist['Volume'],
+            name='Volume',
+            yaxis='y2',
+            marker=dict(color='lightgray', opacity=0.3)
+        ))
+        
+        # Ajouter des lignes verticales pour les heures de trading
+        if interval in ["1m", "5m", "15m", "30m", "1h"] and not hist.empty:
+            # Obtenir la date du dernier point
+            last_date = hist.index[-1].date()
             
-            st.write(f"**P/E :** {info.get('trailingPE', 'N/A')}")
-            st.write(f"**Dividende :** {info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "**Dividende :** N/A")
-            st.write(f"**Beta :** {info.get('beta', 'N/A')}")
+            # Convertir les heures de trading chinoises en UTC+2
+            try:
+                trading_morning_start = CHINA_TIMEZONE.localize(datetime.combine(last_date, datetime.strptime("09:30", "%H:%M").time())).astimezone(USER_TIMEZONE)
+                trading_morning_end = CHINA_TIMEZONE.localize(datetime.combine(last_date, datetime.strptime("11:30", "%H:%M").time())).astimezone(USER_TIMEZONE)
+                trading_afternoon_start = CHINA_TIMEZONE.localize(datetime.combine(last_date, datetime.strptime("13:00", "%H:%M").time())).astimezone(USER_TIMEZONE)
+                trading_afternoon_end = CHINA_TIMEZONE.localize(datetime.combine(last_date, datetime.strptime("15:00", "%H:%M").time())).astimezone(USER_TIMEZONE)
+                
+                # Ajouter des annotations pour les périodes de trading
+                fig.add_vrect(
+                    x0=trading_morning_start,
+                    x1=trading_morning_end,
+                    fillcolor="green",
+                    opacity=0.1,
+                    layer="below",
+                    line_width=0,
+                    annotation_text="Session matin"
+                )
+                fig.add_vrect(
+                    x0=trading_afternoon_start,
+                    x1=trading_afternoon_end,
+                    fillcolor="green",
+                    opacity=0.1,
+                    layer="below",
+                    line_width=0,
+                    annotation_text="Session après-midi"
+                )
+            except:
+                pass  # Ignorer les erreurs d'annotation
+        
+        fig.update_layout(
+            title=f"{symbol} - {period} - {exchange} (heures UTC+2)",
+            yaxis_title="Prix",
+            yaxis2=dict(
+                title="Volume",
+                overlaying='y',
+                side='right',
+                showgrid=False
+            ),
+            xaxis_title="Date (UTC+2)",
+            height=600,
+            hovermode='x unified',
+            template='plotly_white'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Informations sur l'entreprise
+        with st.expander("ℹ️ Informations sur l'entreprise"):
+            if info:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write(f"**Nom :** {info.get('longName', 'N/A')}")
+                    st.write(f"**Secteur :** {info.get('sector', 'N/A')}")
+                    st.write(f"**Industrie :** {info.get('industry', 'N/A')}")
+                    st.write(f"**Site web :** {info.get('website', 'N/A')}")
+                    
+                    # Informations spécifiques Chine
+                    st.write(f"**Place de cotation :** {exchange}")
+                    if 'currency' in info:
+                        st.write(f"**Devise :** {info.get('currency', 'N/A')}")
+                
+                with col2:
+                    market_cap = info.get('marketCap', 0)
+                    if market_cap > 0:
+                        st.write(f"**Capitalisation :** {format_large_number(market_cap)}")
+                    else:
+                        st.write("**Capitalisation :** N/A")
+                    
+                    st.write(f"**P/E :** {info.get('trailingPE', 'N/A')}")
+                    st.write(f"**Dividende :** {info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "**Dividende :** N/A")
+                    st.write(f"**Beta :** {info.get('beta', 'N/A')}")
+            else:
+                st.write("Informations non disponibles")
 
 # ============================================================================
 # SECTION 2: PORTEFEUILLE VIRTUEL
@@ -582,8 +629,8 @@ elif menu == "💰 Portefeuille virtuel":
             - .HK (Hong Kong)
             """)
             
-            shares = st.number_input("Nombre d'actions", min_value=0.01, step=0.01)
-            buy_price = st.number_input("Prix d'achat", min_value=0.01, step=0.01)
+            shares = st.number_input("Nombre d'actions", min_value=0.01, step=0.01, value=1.0)
+            buy_price = st.number_input("Prix d'achat", min_value=0.01, step=0.01, value=100.0)
             
             if st.form_submit_button("Ajouter au portefeuille"):
                 if symbol_pf and shares > 0:
@@ -608,7 +655,12 @@ elif menu == "💰 Portefeuille virtuel":
             for symbol_pf, positions in st.session_state.portfolio.items():
                 try:
                     ticker = yf.Ticker(symbol_pf)
-                    current = ticker.history(period='1d')['Close'].iloc[-1]
+                    hist = ticker.history(period='1d')
+                    if not hist.empty:
+                        current = hist['Close'].iloc[-1]
+                    else:
+                        current = 0
+                    
                     exchange = get_exchange(symbol_pf)
                     
                     for pos in positions:
@@ -617,7 +669,7 @@ elif menu == "💰 Portefeuille virtuel":
                         cost = shares * buy_price
                         value = shares * current
                         profit = value - cost
-                        profit_pct = (profit / cost) * 100
+                        profit_pct = (profit / cost * 100) if cost > 0 else 0
                         
                         total_cost += cost
                         total_value += value
@@ -640,57 +692,64 @@ elif menu == "💰 Portefeuille virtuel":
                             'Profit': f"{currency}{profit:,.2f}",
                             'Profit %': f"{profit_pct:.1f}%"
                         })
+                except Exception as e:
+                    st.warning(f"Impossible de charger {symbol_pf}: {str(e)}")
+            
+            if portfolio_data:
+                # Métriques globales
+                total_profit = total_value - total_cost
+                total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0
+                
+                col1_1, col1_2, col1_3 = st.columns(3)
+                col1_1.metric("Valeur totale", f"${total_value:,.2f}")
+                col1_2.metric("Coût total", f"${total_cost:,.2f}")
+                col1_3.metric(
+                    "Profit total",
+                    f"${total_profit:,.2f}",
+                    delta=f"{total_profit_pct:.1f}%"
+                )
+                
+                # Tableau des positions
+                st.markdown("### 📋 Positions détaillées")
+                df_portfolio = pd.DataFrame(portfolio_data)
+                st.dataframe(df_portfolio, use_container_width=True)
+                
+                # Graphique de répartition
+                try:
+                    fig_pie = px.pie(
+                        names=[p['Symbole'] for p in portfolio_data],
+                        values=[float(p['Valeur'].split('$')[-1].replace(',', '')) if '$' in p['Valeur'] 
+                                else float(p['Valeur'].split('¥')[-1].replace(',', '')) for p in portfolio_data],
+                        title="Répartition du portefeuille"
+                    )
+                    st.plotly_chart(fig_pie)
+                    
+                    # Répartition par marché
+                    st.markdown("### 🏢 Répartition par marché")
+                    market_dist = {}
+                    for p in portfolio_data:
+                        market = p['Marché']
+                        value = float(p['Valeur'].split('$')[-1].replace(',', '')) if '$' in p['Valeur'] \
+                                else float(p['Valeur'].split('¥')[-1].replace(',', ''))
+                        market_dist[market] = market_dist.get(market, 0) + value
+                    
+                    if market_dist:
+                        fig_market = px.bar(
+                            x=list(market_dist.keys()),
+                            y=list(market_dist.values()),
+                            title="Valeur par marché",
+                            labels={'x': 'Marché', 'y': 'Valeur (USD)'}
+                        )
+                        st.plotly_chart(fig_market)
                 except:
-                    st.warning(f"Impossible de charger {symbol_pf}")
-            
-            # Métriques globales
-            total_profit = total_value - total_cost
-            total_profit_pct = (total_profit / total_cost) * 100 if total_cost > 0 else 0
-            
-            col1_1, col1_2, col1_3 = st.columns(3)
-            col1_1.metric("Valeur totale", f"${total_value:,.2f}")
-            col1_2.metric("Coût total", f"${total_cost:,.2f}")
-            col1_3.metric(
-                "Profit total",
-                f"${total_profit:,.2f}",
-                delta=f"{total_profit_pct:.1f}%"
-            )
-            
-            # Tableau des positions
-            st.markdown("### 📋 Positions détaillées")
-            df_portfolio = pd.DataFrame(portfolio_data)
-            st.dataframe(df_portfolio, use_container_width=True)
-            
-            # Graphique de répartition
-            fig_pie = px.pie(
-                names=[p['Symbole'] for p in portfolio_data],
-                values=[float(p['Valeur'].split('$')[-1].replace(',', '')) if '$' in p['Valeur'] 
-                        else float(p['Valeur'].split('¥')[-1].replace(',', '')) for p in portfolio_data],
-                title="Répartition du portefeuille"
-            )
-            st.plotly_chart(fig_pie)
-            
-            # Répartition par marché
-            st.markdown("### 🏢 Répartition par marché")
-            market_dist = {}
-            for p in portfolio_data:
-                market = p['Marché']
-                value = float(p['Valeur'].split('$')[-1].replace(',', '')) if '$' in p['Valeur'] \
-                        else float(p['Valeur'].split('¥')[-1].replace(',', ''))
-                market_dist[market] = market_dist.get(market, 0) + value
-            
-            fig_market = px.bar(
-                x=list(market_dist.keys()),
-                y=list(market_dist.values()),
-                title="Valeur par marché",
-                labels={'x': 'Marché', 'y': 'Valeur (USD)'}
-            )
-            st.plotly_chart(fig_market)
-            
-            # Bouton pour vider le portefeuille
-            if st.button("🗑️ Vider le portefeuille"):
-                st.session_state.portfolio = {}
-                st.rerun()
+                    st.warning("Impossible de générer les graphiques")
+                
+                # Bouton pour vider le portefeuille
+                if st.button("🗑️ Vider le portefeuille"):
+                    st.session_state.portfolio = {}
+                    st.rerun()
+            else:
+                st.info("Aucune donnée de performance disponible")
         else:
             st.info("Aucune position dans le portefeuille. Ajoutez des actions chinoises pour commencer !")
 
@@ -705,15 +764,16 @@ elif menu == "🔔 Alertes de prix":
     with col1:
         st.markdown("### ➕ Créer une nouvelle alerte")
         with st.form("new_alert"):
-            alert_symbol = st.text_input("Symbole", value=symbol).upper()
+            alert_symbol = st.text_input("Symbole", value=symbol if symbol else "600519.SS").upper()
             exchange = get_exchange(alert_symbol)
             st.caption(f"Marché: {exchange}")
             
+            default_price = float(current_price * 1.05) if current_price > 0 else 100.0
             alert_price = st.number_input(
                 f"Prix cible ({format_currency(0, alert_symbol).split('0')[0]})", 
                 min_value=0.01, 
                 step=0.01, 
-                value=float(current_price * 1.05)
+                value=default_price
             )
             
             col_cond, col_type = st.columns(2)
@@ -806,7 +866,7 @@ elif menu == "📧 Notifications email":
 elif menu == "📤 Export des données":
     st.subheader("📤 Export des données")
     
-    if hist is not None:
+    if hist is not None and not hist.empty:
         col1, col2 = st.columns(2)
         
         with col1:
@@ -836,7 +896,7 @@ elif menu == "📤 Export des données":
                 'Écart-type': hist['Close'].std(),
                 'Min': hist['Close'].min(),
                 'Max': hist['Close'].max(),
-                'Variation totale': f"{(hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100:.2f}%"
+                'Variation totale': f"{(hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100:.2f}%" if len(hist) > 1 else "N/A"
             }
             
             for key, value in stats.items():
@@ -851,9 +911,9 @@ elif menu == "📤 Export des données":
                 'exchange': get_exchange(symbol),
                 'last_update': datetime.now(USER_TIMEZONE).isoformat(),
                 'timezone': 'UTC+2',
-                'current_price': current_price,
+                'current_price': float(current_price) if current_price else 0,
                 'currency': 'HKD' if symbol.endswith('.HK') else 'CNY' if symbol.endswith(('.SS', '.SZ')) else 'USD',
-                'statistics': {k: (float(v) if isinstance(v, float) else v) for k, v in stats.items()},
+                'statistics': {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in stats.items()},
                 'data': hist.reset_index().to_dict(orient='records')
             }
             
@@ -864,7 +924,7 @@ elif menu == "📤 Export des données":
                 mime="application/json"
             )
     else:
-        st.warning("Aucune donnée à exporter")
+        st.warning(f"Aucune donnée à exporter pour {symbol}")
 
 # ============================================================================
 # SECTION 6: PRÉDICTIONS ML
@@ -872,7 +932,7 @@ elif menu == "📤 Export des données":
 elif menu == "🤖 Prédictions ML":
     st.subheader("🤖 Prédictions avec Machine Learning - Actions Chine")
     
-    if hist is not None and len(hist) > 30:
+    if hist is not None and not hist.empty and len(hist) > 30:
         st.markdown("### Modèle de prédiction (Régression polynomiale)")
         
         # Note sur les marchés chinois
@@ -978,6 +1038,7 @@ elif menu == "🤖 Prédictions ML":
         
         # Métriques de performance
         st.markdown("### 📊 Performance du modèle")
+        residuals = y - model.predict(X)
         mse = np.mean(residuals**2)
         rmse = np.sqrt(mse)
         mae = np.mean(np.abs(residuals))
@@ -1022,7 +1083,7 @@ elif menu == "🤖 Prédictions ML":
             """)
         
     else:
-        st.warning("Pas assez de données historiques pour faire des prédictions (minimum 30 points)")
+        st.warning(f"Pas assez de données historiques pour {symbol} (minimum 30 points)")
 
 # ============================================================================
 # SECTION 7: INDICES CHINE
@@ -1072,12 +1133,15 @@ elif menu == "🏢 Indices Chine":
             
             if not index_hist.empty:
                 # Convertir en UTC+2
-                index_hist.index = index_hist.index.tz_localize('UTC').tz_convert(USER_TIMEZONE)
+                if index_hist.index.tz is None:
+                    index_hist.index = index_hist.index.tz_localize('UTC').tz_convert(USER_TIMEZONE)
+                else:
+                    index_hist.index = index_hist.index.tz_convert(USER_TIMEZONE)
                 
                 current_index = index_hist['Close'].iloc[-1]
                 prev_index = index_hist['Close'].iloc[-2] if len(index_hist) > 1 else current_index
                 index_change = current_index - prev_index
-                index_change_pct = (index_change / prev_index) * 100
+                index_change_pct = (index_change / prev_index) * 100 if prev_index != 0 else 0
                 
                 st.markdown(f"### {chinese_indices[selected_index]}")
                 
@@ -1117,7 +1181,7 @@ elif menu == "🏢 Indices Chine":
                 col_s4.metric("Volatilité", f"{index_hist['Close'].pct_change().std()*100:.2f}%")
                 
         except Exception as e:
-            st.error(f"Erreur lors du chargement de l'indice: {e}")
+            st.error(f"Erreur lors du chargement de l'indice: {str(e)}")
     
     # Tableau de comparaison des indices
     st.markdown("### 📊 Comparaison des indices")
@@ -1130,7 +1194,7 @@ elif menu == "🏢 Indices Chine":
             if not hist.empty:
                 current = hist['Close'].iloc[-1]
                 prev = hist['Close'].iloc[0]
-                change_pct = ((current - prev) / prev) * 100
+                change_pct = ((current - prev) / prev) * 100 if prev != 0 else 0
                 
                 comparison_data.append({
                     'Indice': name,
@@ -1191,8 +1255,12 @@ with col_w1:
                 with cols[i % 4]:
                     try:
                         ticker = yf.Ticker(sym)
-                        price = ticker.history(period='1d')['Close'].iloc[-1]
-                        st.metric(sym, f"¥{price:.2f}")
+                        hist = ticker.history(period='1d')
+                        if not hist.empty:
+                            price = hist['Close'].iloc[-1]
+                            st.metric(sym, f"¥{price:.2f}")
+                        else:
+                            st.metric(sym, "N/A")
                     except:
                         st.metric(sym, "N/A")
         else:
@@ -1205,8 +1273,12 @@ with col_w1:
                 with cols[i % 4]:
                     try:
                         ticker = yf.Ticker(sym)
-                        price = ticker.history(period='1d')['Close'].iloc[-1]
-                        st.metric(sym, f"¥{price:.2f}")
+                        hist = ticker.history(period='1d')
+                        if not hist.empty:
+                            price = hist['Close'].iloc[-1]
+                            st.metric(sym, f"¥{price:.2f}")
+                        else:
+                            st.metric(sym, "N/A")
                     except:
                         st.metric(sym, "N/A")
         else:
@@ -1219,8 +1291,12 @@ with col_w1:
                 with cols[i % 4]:
                     try:
                         ticker = yf.Ticker(sym)
-                        price = ticker.history(period='1d')['Close'].iloc[-1]
-                        st.metric(sym, f"HK${price:.2f}")
+                        hist = ticker.history(period='1d')
+                        if not hist.empty:
+                            price = hist['Close'].iloc[-1]
+                            st.metric(sym, f"HK${price:.2f}")
+                        else:
+                            st.metric(sym, "N/A")
                     except:
                         st.metric(sym, "N/A")
         else:
@@ -1233,8 +1309,12 @@ with col_w1:
                 with cols[i % 4]:
                     try:
                         ticker = yf.Ticker(sym)
-                        price = ticker.history(period='1d')['Close'].iloc[-1]
-                        st.metric(sym, f"${price:.2f}")
+                        hist = ticker.history(period='1d')
+                        if not hist.empty:
+                            price = hist['Close'].iloc[-1]
+                            st.metric(sym, f"${price:.2f}")
+                        else:
+                            st.metric(sym, "N/A")
                     except:
                         st.metric(sym, "N/A")
         else:
@@ -1252,7 +1332,7 @@ with col_w2:
     market_status, market_icon = get_market_status()
     st.caption(f"{market_icon} Marché: {market_status}")
     
-    if auto_refresh:
+    if auto_refresh and hist is not None and not hist.empty:
         time.sleep(refresh_rate)
         st.rerun()
 
